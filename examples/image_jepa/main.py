@@ -64,10 +64,25 @@ class ResNet18(nn.Module):
     def __init__(self):
         super().__init__()
         self.backbone = torchvision.models.resnet18()
+        #MO This replaces the final fully connected layer with identity.
+        #MO defautl resnet ends with self.fc = nn.Linear(512, 1000)
+        #MO So instead of outputting: [batch_size, 1000]
+        #MO now it outputs: [batch_size, 512]
+        #MO Why 512?
+        #MO Because ResNet-18’s last convolution block outputs 512 feature channels, and after global average pooling you get a 512-dimensional vector.
         self.backbone.fc = nn.Identity()  # Remove final classification layer
+        #MO Original Conv2d(3, 64, kernel_size=7, stride=2, padding=3)
+        #MO why change?
+        #MO Likely because: You're working with small images (e.g., CIFAR-10: 32×32)
+        #MO A 7×7 kernel with stride 2 would shrink them too aggressively
         self.backbone.conv1 = nn.Conv2d(
             3, 64, kernel_size=3, stride=1, padding=2, bias=False
         )
+        #MO Remove Max Pooling, Removing it:
+        #MO Prevents early downsampling
+        #MO Preserves spatial resolution
+        #MO Works better for small inputs
+        #MO This is very common for CIFAR-style ResNets.
         self.backbone.maxpool = nn.Identity()
         self.features_dim = 512
 
@@ -82,10 +97,13 @@ class ImageSSL(nn.Module):
         self, backbone, features_dim, proj_hidden_dim=2048, proj_output_dim=2048
     ):
         super().__init__()
-        self.backbone = backbone
-        self.features_dim = features_dim
+        self.backbone = backbone #MO backbone is the resnet18 or vit_s or vit_b
+        self.features_dim = features_dim #MO features_dim is the number of features output by the backbone
 
         # Projector
+        #MO This is the projector!
+        #MO It projects representation in higher dimension for regularization and cost
+        #MO It is a MLP with 3 layers
         self.projector = nn.Sequential(
             nn.Linear(features_dim, proj_hidden_dim),
             nn.BatchNorm1d(proj_hidden_dim),
@@ -97,6 +115,9 @@ class ImageSSL(nn.Module):
         )
 
     def forward(self, x):
+        #MO x is the input image
+        #MO features is the output of the backbone
+        #MO projections is the output of the projector
         features = self.backbone(x)
         projections = self.projector(features)
         return features, projections
@@ -104,7 +125,7 @@ class ImageSSL(nn.Module):
 
 class LARS(optim.Optimizer):
     """LARS optimizer implementation."""
-
+    #MO LARS is a variant of SGD that scales the learning rate by the norm of the parameters
     def __init__(
         self,
         params,
@@ -209,6 +230,10 @@ class LARS(optim.Optimizer):
 
 class WarmupCosineScheduler:
     """Warmup cosine learning rate scheduler"""
+    #MO This is a learning rate scheduler that combines a warmup period and a cosine annealing period
+    #MO The warmup period is a period where the learning rate is linearly increased from a very small value to the base learning rate
+    #MO The cosine annealing period is a period where the learning rate is decreased from the base learning rate to a minimum learning rate using cosine annealing
+    #MO The warmup period is followed by the cosine annealing period
 
     def __init__(
         self,
@@ -227,6 +252,10 @@ class WarmupCosineScheduler:
         self.warmup_start_lr = warmup_start_lr
 
     def step(self, epoch):
+        #MO This is the step function for the learning rate scheduler
+        #MO It calculates the learning rate based on the epoch
+        #MO If the epoch is less than the warmup epochs, the learning rate is linearly increased from the warmup start learning rate to the base learning rate
+        #MO If the epoch is greater than or equal to the warmup epochs, the learning rate is decreased from the base learning rate to the minimum learning rate using cosine annealing
         if epoch < self.warmup_epochs:
             lr = self.warmup_start_lr + epoch * (
                 self.base_lr - self.warmup_start_lr
@@ -262,72 +291,77 @@ def train_epoch(
     tqdm_silent=False,
 ):
     """Train for one epoch."""
-    model.train()
-    linear_probe.train()
+    model.train() #MO Enable training behavior for the main model
+    linear_probe.train() #MO Enable training behavior for the linear probe
 
     # Dynamic loss accumulator
+    #MO Track running sums of each loss term across the epoch
     loss_totals = {}
-    total_linear_loss = 0
-    linear_correct = 0
-    linear_total = 0
+    total_linear_loss = 0 #MO Accumulate the linear-probe classification loss over all batches
+    linear_correct = 0 #MO Accumulate the number of correct linear-probe predictions
+    linear_total = 0 #MO Accumulate the total number of evaluated samples
 
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=tqdm_silent)
-    for batch_idx, (views, target) in enumerate(pbar):
-        view1, view2 = views[0].to(device, non_blocking=True), views[1].to(
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=tqdm_silent) #MO Show batch progress for the current training epoch
+    for batch_idx, (views, target) in enumerate(pbar): #MO Iterate over paired augmented views and labels from the training loader
+        view1, view2 = views[0].to(device, non_blocking=True), views[1].to( #MO Move both augmented views to the training device
             device, non_blocking=True
         )
-        target = target.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True) #MO Move the ground-truth labels to the same device
 
+        #MO Run the forward pass under automatic mixed precision when AMP is enabled
         with autocast(device.type, enabled=use_amp, dtype=dtype):
-            features, z1 = model(view1)
-            _, z2 = model(view2)
-            loss_dict = loss_fn(z1, z2)
-            loss = loss_dict["loss"]
+            features, z1 = model(view1) #MO Encode the first augmented view and keep both features and its projection
+            _, z2 = model(view2) #MO Encode the second augmented view and keep only its projection for the JEPA loss
+            loss_dict = loss_fn(z1, z2) #MO Compute the JEPA loss terms from the two projected views
+            loss = loss_dict["loss"] #MO Extract the total JEPA loss used for training
 
         with torch.no_grad():
-            features_frozen = features.detach().float()
+            #MO Prepare a feature tensor for the linear probe without tracking gradients
+            #MO This keeps the probe loss from backpropagating into the main model
+            features_frozen = features.detach().float() #MO Detach from the encoder graph and cast to float for the probe
 
-        linear_outputs = linear_probe(features_frozen)
-        linear_loss = F.cross_entropy(linear_outputs, target)
+        linear_outputs = linear_probe(features_frozen) #MO Run the frozen features through the linear probe to produce one logit per class
+        linear_loss = F.cross_entropy(linear_outputs, target) #MO Compute the classification loss between the probe logits and the ground-truth labels
 
-        _, predicted = linear_outputs.max(1)
-        linear_correct_batch = predicted.eq(target).sum().item()
+        _, predicted = linear_outputs.max(1) #MO Pick the class index with the highest logit for each sample in the batch
+        linear_correct_batch = predicted.eq(target).sum().item() #MO Count how many predicted class indices match the ground-truth labels
 
-        total_loss_batch = loss + linear_loss
 
-        optimizer.zero_grad()
-        scaler.scale(total_loss_batch).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        total_loss_batch = loss + linear_loss #MO Joint training loss: JEPA objective plus linear-probe classification loss
 
-        # Update metrics dynamically based on loss_dict keys
-        for key, value in loss_dict.items():
+        optimizer.zero_grad() #MO Clear gradients from the previous batch before computing new ones
+        scaler.scale(total_loss_batch).backward() #MO Backpropagate the scaled loss for mixed-precision stability
+        scaler.step(optimizer) #MO Apply the optimizer update using the gradients from this batch
+        scaler.update() #MO Update the GradScaler scale factor for the next iteration
+
+        #MO Accumulate each JEPA loss term returned for this batch
+        for key, value in loss_dict.items(): #MO Iterate over named loss components such as total loss and any auxiliary terms
             if key not in loss_totals:
-                loss_totals[key] = 0
-            loss_totals[key] += value.item()
-        total_linear_loss += linear_loss.item()
+                loss_totals[key] = 0 #MO Initialize the running sum the first time this loss key appears
+            loss_totals[key] += value.item() #MO Add the current batch loss value to the epoch total for this key
+        total_linear_loss += linear_loss.item() #MO Add the current batch linear-probe loss to its epoch total
 
         # Update linear probe accuracy (pre-computed under autocast)
-        linear_total += target.size(0)
-        linear_correct += linear_correct_batch
+        linear_total += target.size(0) #MO Add the number of samples in this batch to the epoch total
+        linear_correct += linear_correct_batch #MO Add this batch's correct predictions to the running accuracy count
 
         # Update progress bar
         pbar.set_postfix(
             {
-                "Loss": f"{loss.item():.4f}",
-                "Linear": f"{linear_loss.item():.4f}",
-                "Acc": f"{100.*linear_correct/linear_total:.2f}%",
+                "Loss": f"{loss.item():.4f}", #MO Current batch JEPA loss
+                "Linear": f"{linear_loss.item():.4f}", #MO Current batch linear-probe classification loss
+                "Acc": f"{100.*linear_correct/linear_total:.2f}%", #MO Running linear-probe accuracy over the epoch so far
             }
         )
 
     # Update learning rate
-    scheduler.step(epoch)
+    scheduler.step(epoch) #MO Advance the learning-rate schedule for this epoch
 
     # Build return dict dynamically
-    num_batches = len(train_loader)
-    metrics = {key: total / num_batches for key, total in loss_totals.items()}
-    metrics["linear_loss"] = total_linear_loss / num_batches
-    metrics["linear_acc"] = 100.0 * linear_correct / linear_total
+    num_batches = len(train_loader) #MO Number of batches processed in this training epoch
+    metrics = {key: total / num_batches for key, total in loss_totals.items()} #MO Convert accumulated JEPA losses into per-batch averages
+    metrics["linear_loss"] = total_linear_loss / num_batches #MO Store the average linear-probe loss for the epoch
+    metrics["linear_acc"] = 100.0 * linear_correct / linear_total #MO Store the final linear-probe accuracy as a percentage
 
     return metrics
 
@@ -485,6 +519,8 @@ def run(
     log_config(cfg)
 
     # Initialize linear probe
+    #MO This is a linear classifier that is used to evaluate the performance of the model
+    #MO It is a MLP with a single linear layer
     linear_probe = LinearProbe(feature_dim=features_dim, num_classes=10).to(device)
 
     # Mixed precision setup
@@ -517,8 +553,12 @@ def run(
 
     # Initialize loss function
     if cfg.loss.type == "vicreg":
+        #MO This is the VICReg loss function
+        #MO It is a loss function that encourages the model to learn a representation that is both consistent and diverse
         loss_fn = VICRegLoss(std_coeff=cfg.loss.std_coeff, cov_coeff=cfg.loss.cov_coeff)
     elif cfg.loss.type == "bcs":
+        #MO This is the BCS loss function
+        #MO It is a loss function that encourages the model to learn a representation that is both consistent and diverse
         loss_fn = BCS(lmbd=cfg.loss.lmbd)
 
     # Load checkpoint if requested

@@ -18,6 +18,75 @@ The Image JEPA consists of:
 - **Regularizer**: Variance-Covariance (VC) or SIGReg loss to prevent representation collapse
 - **Projector**: Learned MLP Projector (loss is computed on the projected subspace)
 
+### How Linear Probing Works
+
+The linear probe in this example is trained online during self-supervised training. It reads the encoder features, but those features are detached before classification, so the linear probe loss updates only the classifier and not the encoder.
+
+#### Forward Path
+
+```mermaid
+flowchart TD
+    A[Input image] --> B[Two augmentations]
+    B --> C[view1]
+    B --> D[view2]
+
+    C --> E[Backbone encoder]
+    D --> F[Backbone encoder]
+
+    E --> G[features1]
+    F --> H[features2]
+
+    G --> I[Projector]
+    H --> J[Projector]
+
+    I --> K[z1]
+    J --> L[z2]
+
+    K --> M[SSL loss]
+    L --> M
+
+    G --> N[detach / stop_gradient]
+    N --> O[Linear probe]
+    P[Class label] --> Q[Cross-entropy]
+    O --> Q
+```
+
+#### Gradient Flow
+
+```mermaid
+flowchart TD
+    A[Augmented view 1] --> B[Backbone]
+    B --> C[features1]
+    C --> D[Projector]
+    D --> E[z1]
+
+    F[Augmented view 2] --> G[Backbone]
+    G --> H[features2]
+    H --> I[Projector]
+    I --> J[z2]
+
+    E --> K[SSL loss: VICReg or BCS]
+    J --> K
+
+    C --> L[detach / stop_gradient]
+    L --> M[Linear probe]
+    N[Labels] --> O[Cross-entropy linear loss]
+    M --> O
+
+    K -. gradients .-> B
+    K -. gradients .-> D
+
+    O -. gradients .-> M
+    O -. blocked by detach .-> P[No gradient to backbone]
+```
+
+In short:
+
+- The self-supervised loss updates the backbone and projector.
+- The linear probe loss updates only the linear classifier.
+- The probe acts as an online measurement of how linearly separable the learned features are.
+  In practice, this means training a very simple classifier on top of the encoder features. If that classifier reaches good accuracy, it suggests the learned features capture useful abstractions and already make the classes easy to separate.
+
 ## Usage
 
 ### Training Configurations

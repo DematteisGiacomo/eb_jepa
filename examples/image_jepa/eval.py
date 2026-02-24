@@ -10,6 +10,7 @@ from torch.amp import autocast
 
 class LinearProbe(nn.Module):
     """Linear probe classifier for evaluating representations."""
+    #MO just a classifier made of a single linear layer?
 
     def __init__(self, feature_dim, num_classes):
         super().__init__()
