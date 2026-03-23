@@ -1,6 +1,6 @@
 ## Self-Supervised Representation Learning from Unlabeled Images
 
-This example demonstrates how to train a Joint Embedding Predictive Architecture (JEPA) on unlabeled images. More precisely, methods studied here are JEAs as there is no predictor. The model learns representations from individual frames of the CIFAR 10 dataset and is evaluated using linear probing for image classification.
+This example demonstrates how to train a Joint Embedding Predictive Architecture (JEPA) on unlabeled images. More precisely, methods studied here are JEAs as there is no predictor. The default setup learns representations from CIFAR-10, and the example also supports manifest-based datasets such as lesion-centered PROSTATEx MRI patches.
 
 ![Image JEPA Architecture](assets/arch_figure.png)
 
@@ -8,6 +8,9 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 
 If you want to try this example in Google Colab, use the notebook in this repository:
 [`colab_training.ipynb`](./colab_training.ipynb)
+
+For PROSTATEx preprocessing and training, use:
+[`colab_prostatex.ipynb`](./colab_prostatex.ipynb)
 
 The notebook provides:
 - Pre-configured environment setup
@@ -133,6 +136,34 @@ You can override any config parameter using dot notation:
 ```bash
 python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/default.yaml optim.epochs=50 data.batch_size=128
 ```
+
+### PROSTATEx Training
+
+The PROSTATEx path expects a CSV manifest with columns:
+`image_path,label,patient_id,finding_id,split`
+
+To build that manifest from the public PROSTATEx training download, run:
+
+```bash
+python -m examples.image_jepa.prostatex_preprocess \
+  --raw_root /path/to/PROSTATEx \
+  --output_dir eb_jepa/datasets/prostatex
+```
+
+This creates:
+- `prostatex_manifest.csv`
+- `dataset_stats.json`
+- `patches/*.npy`
+
+Then train Image JEPA with:
+
+```bash
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/prostatex.yaml
+```
+
+After preprocessing, copy the channel statistics from `dataset_stats.json` into
+`data.mean` and `data.std` in `examples/image_jepa/cfgs/prostatex.yaml` for the
+best normalization.
 
 ## Results
 

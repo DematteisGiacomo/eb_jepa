@@ -1,7 +1,7 @@
 """
-CIFAR-10 VICReg Training Script - Native PyTorch Implementation
+Image JEPA training script for CIFAR-10 and manifest-based datasets.
 
-This script implements VICReg training on CIFAR-10 dataset using only PyTorch and torchvision.
+This script implements VICReg/BCS training using only PyTorch and torchvision.
 Supports both ResNet and Vision Transformer (ViT) backbones.
 
 Usage:
@@ -50,6 +50,7 @@ from eb_jepa.training_utils import (
 )
 from examples.image_jepa.dataset import (
     ImageDataset,
+    ManifestImageDataset,
     get_train_transforms,
     get_val_transforms,
 )
@@ -61,14 +62,19 @@ logger = get_logger(__name__)
 class ResNet18(nn.Module):
     """ResNet-18 backbone implementation."""
 
-    def __init__(self):
+    def __init__(self, in_channels=3, image_size=32):
         super().__init__()
         self.backbone = torchvision.models.resnet18()
         self.backbone.fc = nn.Identity()  # Remove final classification layer
-        self.backbone.conv1 = nn.Conv2d(
-            3, 64, kernel_size=3, stride=1, padding=2, bias=False
-        )
-        self.backbone.maxpool = nn.Identity()
+        if image_size <= 64:
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=3, stride=1, padding=1, bias=False
+            )
+            self.backbone.maxpool = nn.Identity()
+        elif in_channels != 3:
+            self.backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
         self.features_dim = 512
 
     def forward(self, x):
@@ -332,6 +338,67 @@ def train_epoch(
     return metrics
 
 
+def build_datasets(cfg, data_dir):
+    """Build train and validation datasets from configuration."""
+    dataset_name = cfg.data.dataset.lower()
+    image_size = cfg.data.get("image_size", 32)
+    mean = cfg.data.get("mean", [0.4914, 0.4822, 0.4465])
+    std = cfg.data.get("std", [0.2023, 0.1994, 0.2010])
+    crop_scale = tuple(cfg.data.get("crop_scale", [0.2, 1.0]))
+    num_crops = cfg.data.get("num_crops", 2)
+
+    if dataset_name == "cifar10":
+        logger.info("Loading CIFAR-10 dataset...")
+        train_transform = get_train_transforms(
+            image_size=image_size,
+            mean=mean,
+            std=std,
+            profile=cfg.data.get("transform_profile", "natural"),
+            crop_scale=crop_scale,
+        )
+        val_transform = get_val_transforms(image_size=image_size, mean=mean, std=std)
+
+        base_train_dataset = CIFAR10(
+            root=data_dir, train=True, download=True, transform=None
+        )
+        train_dataset = ImageDataset(base_train_dataset, train_transform, num_crops)
+        val_dataset = CIFAR10(
+            root=data_dir, train=False, download=True, transform=val_transform
+        )
+        dataset_display_name = "CIFAR-10"
+    elif dataset_name == "prostatex":
+        manifest_path = cfg.data.get("manifest_path")
+        if not manifest_path:
+            raise ValueError("cfg.data.manifest_path is required for ProstateX training")
+
+        logger.info(f"Loading ProstateX manifest from {manifest_path}...")
+        train_transform = get_train_transforms(
+            image_size=image_size,
+            mean=mean,
+            std=std,
+            profile=cfg.data.get("transform_profile", "medical"),
+            crop_scale=crop_scale,
+        )
+        val_transform = get_val_transforms(image_size=image_size, mean=mean, std=std)
+
+        base_train_dataset = ManifestImageDataset(
+            manifest_path=manifest_path,
+            split=cfg.data.get("train_split", "train"),
+            transform=None,
+        )
+        train_dataset = ImageDataset(base_train_dataset, train_transform, num_crops)
+        val_dataset = ManifestImageDataset(
+            manifest_path=manifest_path,
+            split=cfg.data.get("val_split", "val"),
+            transform=val_transform,
+        )
+        dataset_display_name = "ProstateX"
+    else:
+        raise ValueError(f"Unsupported dataset: {cfg.data.dataset}")
+
+    return train_dataset, val_dataset, dataset_display_name
+
+
 def run(
     fname: str = "examples/image_jepa/cfgs/default.yaml",
     cfg=None,
@@ -339,7 +406,7 @@ def run(
     **overrides,
 ):
     """
-    Train an Image JEPA (VICReg/BCS) model on CIFAR-10.
+    Train an Image JEPA (VICReg/BCS) model on an image dataset.
 
     Args:
         fname: Path to YAML config file
@@ -388,22 +455,10 @@ def run(
         sweep_id=cfg.logging.get("wandb_sweep_id"),
     )
 
-    logger.info("Loading CIFAR-10 dataset...")
-    transform = get_train_transforms()
-
     # Use EBJEPA_DSETS environment variable if set, otherwise fall back to config
     data_dir = os.environ.get("EBJEPA_DSETS", cfg.data.data_dir)
     logger.info(f"Using data directory: {data_dir}")
-
-    base_train_dataset = CIFAR10(
-        root=data_dir, train=True, download=True, transform=None
-    )
-
-    train_dataset = ImageDataset(base_train_dataset, transform, num_crops=2)
-
-    val_dataset = CIFAR10(
-        root=data_dir, train=False, download=True, transform=get_val_transforms()
-    )
+    train_dataset, val_dataset, dataset_display_name = build_datasets(cfg, data_dir)
 
     train_loader = DataLoader(
         train_dataset,
@@ -423,7 +478,7 @@ def run(
     )
 
     log_data_info(
-        "CIFAR-10",
+        dataset_display_name,
         len(train_loader),
         cfg.data.batch_size,
         train_samples=len(train_dataset),
@@ -432,14 +487,18 @@ def run(
 
     # Initialize model
     logger.info("Initializing model...")
+    image_size = cfg.data.get("image_size", 32)
+    in_channels = cfg.data.get("in_channels", 3)
     if cfg.model.type == "resnet":
-        backbone = ResNet18()
+        backbone = ResNet18(in_channels=in_channels, image_size=image_size)
         features_dim = backbone.features_dim
     elif cfg.model.type == "vit_s":
+        if in_channels != 3:
+            raise ValueError("VisionTransformer backbones currently require 3 input channels")
         features_dim = 384
         model_kwargs = dict(
-            image_size=32,
-            patch_size=8,
+            image_size=image_size,
+            patch_size=cfg.model.patch_size,
             hidden_dim=features_dim,
             num_layers=12,
             num_heads=6,
@@ -448,10 +507,12 @@ def run(
         backbone = VisionTransformer(**model_kwargs)
         backbone.heads = nn.Identity()
     elif cfg.model.type == "vit_b":
+        if in_channels != 3:
+            raise ValueError("VisionTransformer backbones currently require 3 input channels")
         features_dim = 768
         model_kwargs = dict(
-            image_size=32,
-            patch_size=8,
+            image_size=image_size,
+            patch_size=cfg.model.patch_size,
             hidden_dim=features_dim,
             num_layers=12,
             num_heads=12,
@@ -485,7 +546,9 @@ def run(
     log_config(cfg)
 
     # Initialize linear probe
-    linear_probe = LinearProbe(feature_dim=features_dim, num_classes=10).to(device)
+    linear_probe = LinearProbe(
+        feature_dim=features_dim, num_classes=cfg.data.get("num_classes", 10)
+    ).to(device)
 
     # Mixed precision setup
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16}
@@ -555,7 +618,7 @@ def run(
 
         # Evaluate linear probe on validation set
         val_acc, val_loss = evaluate_linear_probe(
-            model, linear_probe, val_loader, device, use_amp
+            model, linear_probe, val_loader, device, use_amp, dtype
         )
 
         # Log metrics - dynamically add train_ prefix to all train_metrics keys

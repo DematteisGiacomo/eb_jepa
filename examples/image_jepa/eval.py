@@ -19,7 +19,9 @@ class LinearProbe(nn.Module):
         return self.classifier(x)
 
 
-def evaluate_linear_probe(model, linear_probe, val_loader, device, use_amp=True):
+def evaluate_linear_probe(
+    model, linear_probe, val_loader, device, use_amp=True, dtype=torch.float16
+):
     """Evaluate linear probe on validation set."""
     model.eval()
     linear_probe.eval()
@@ -33,7 +35,7 @@ def evaluate_linear_probe(model, linear_probe, val_loader, device, use_amp=True)
             data = data.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
 
-            with autocast("cuda", enabled=use_amp):
+            with autocast(device.type, enabled=use_amp, dtype=dtype):
                 features, _ = model(data)
 
             outputs = linear_probe(features.float())

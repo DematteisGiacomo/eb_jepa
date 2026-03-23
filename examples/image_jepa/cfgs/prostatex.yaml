@@ -1,0 +1,54 @@
+# Image JEPA configuration for PROSTATEx lesion patch training
+
+meta:
+  seed: 42
+  device: auto
+
+data:
+  dataset: prostatex
+  data_dir: "eb_jepa/datasets/prostatex"
+  manifest_path: "eb_jepa/datasets/prostatex/prostatex_manifest.csv"
+  train_split: train
+  val_split: val
+  batch_size: 64
+  num_workers: 4
+  image_size: 224
+  in_channels: 3
+  num_classes: 2
+  transform_profile: medical
+  crop_scale: [0.8, 1.0]
+  num_crops: 2
+  mean: [0.5, 0.5, 0.5]
+  std: [0.25, 0.25, 0.25]
+
+model:
+  type: resnet
+  patch_size: 16
+  use_projector: true
+  proj_hidden_dim: 2048
+  proj_output_dim: 2048
+
+loss:
+  type: vicreg
+  std_coeff: 1.0
+  cov_coeff: 25.0
+  lmbd: 10.0
+
+optim:
+  epochs: 150
+  lr: 0.2
+  weight_decay: 1.0e-4
+  warmup_epochs: 10
+  warmup_start_lr: 3.0e-5
+  min_lr: 0.0
+
+logging:
+  log_wandb: true
+  wandb_group:
+  log_every: 5
+  save_every: 25
+  tqdm_silent: false
+
+training:
+  use_amp: true
+  dtype: bfloat16
